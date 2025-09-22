@@ -54,6 +54,7 @@ def parse_args():
 
 def main():
     # Parse arguments
+    global USE_RESTRUCTURED  # Declare global at the beginning of the function
     args = parse_args()
     model_path = args.model
     labels_path = args.labels
@@ -92,7 +93,6 @@ def main():
                 print("IMX500 device not found using restructured API.")
                 print("Trying original picamera2 implementation...")
                 # Fall back to original implementation
-                global USE_RESTRUCTURED
                 USE_RESTRUCTURED = False
             else:
                 # Load AI model

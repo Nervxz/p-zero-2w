@@ -94,6 +94,7 @@ class ObjectDetectionApp:
     
     def initialize(self):
         """Initialize camera and IMX500 device."""
+        global USE_RESTRUCTURED  # Declare global at the beginning of the function
         try:
             if USE_RESTRUCTURED:
                 # Using restructured API
@@ -107,7 +108,6 @@ class ObjectDetectionApp:
                     print("IMX500 device not found using restructured API.")
                     print("Trying original picamera2 implementation...")
                     # Fall back to original implementation
-                    global USE_RESTRUCTURED
                     USE_RESTRUCTURED = False
                 else:
                     # Load AI model
