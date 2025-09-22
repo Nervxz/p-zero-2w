@@ -63,7 +63,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Fixed IMX500 Object Detection Demo")
     parser.add_argument("--model", required=True, help="Path to the model file (.rpk)")
     parser.add_argument("--labels", required=True, help="Path to the labels file")
-    parser.add_argument("--fps", type=int, help="Frames per second")
+    parser.add_argument("--fps", type=int, default=25, help="Frames per second (default: 25)")
     parser.add_argument("--threshold", type=float, default=0.55, help="Detection threshold (default: 0.55)")
     parser.add_argument("--iou", type=float, default=0.65, help="IOU threshold (default: 0.65)")
     parser.add_argument("--max-detections", type=int, default=10, help="Maximum number of detections (default: 10)")
@@ -133,7 +133,39 @@ def get_labels(labels_tuple, ignore_dash_labels=False):
         return [label for label in labels_tuple if label and label != "-"]
     return list(labels_tuple)
 
-def draw_detections(request, detections, labels, preserve_aspect_ratio=False, imx500_device=None):
+def draw_detections(frame, detections, labels):
+    """Draw detections on a regular frame (not a request)."""
+    if not detections:
+        return frame
+        
+    # Make a copy of the frame
+    result = frame.copy()
+    
+    for detection in detections:
+        x, y, w, h = detection.box
+        label = f"{labels[int(detection.category)]} ({detection.conf:.2f})"
+
+        # Calculate text size and position
+        (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        text_x = x + 5
+        text_y = y + 15
+
+        # Draw background rectangle for text
+        cv2.rectangle(result,
+                      (text_x, text_y - text_height),
+                      (text_x + text_width, text_y + baseline),
+                      (0, 0, 0), -1)  # Black background
+
+        # Draw text
+        cv2.putText(result, label, (text_x, text_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text
+
+        # Draw detection box
+        cv2.rectangle(result, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+
+    return result
+
+def draw_detections_on_request(request, detections, labels, preserve_aspect_ratio=False, imx500_device=None):
     """Draw the detections for this request onto the ISP output."""
     if not detections:
         return
@@ -177,9 +209,6 @@ def draw_detections(request, detections, labels, preserve_aspect_ratio=False, im
                 cv2.rectangle(m.array, (b_x, b_y), (b_x + b_w, b_y + b_h), (255, 0, 0, 0))
             except Exception as e:
                 print(f"Error drawing ROI: {e}")
-
-        cv2.imshow('IMX500 Object Detection', m.array)
-        cv2.waitKey(1)
 
 def detection_worker(jobs_queue, results_queue, imx500_device, camera, args, intrinsics, stop_event):
     """Worker thread for handling detections."""
@@ -229,14 +258,19 @@ def display_worker(results_queue, stop_event, imx500_device, args, labels):
             else:
                 last_detections = detections
                 
-            # Draw detections
-            draw_detections(
+            # Draw detections directly on the request
+            draw_detections_on_request(
                 request, 
                 detections, 
                 labels, 
                 preserve_aspect_ratio=args.preserve_aspect_ratio,
                 imx500_device=imx500_device
             )
+            
+            # Display the image
+            with MappedArray(request, 'main') as m:
+                cv2.imshow('IMX500 Object Detection', m.array)
+                cv2.waitKey(1)
             
             # Release the request
             request.release()
@@ -312,7 +346,7 @@ def main():
     # Initialize camera
     picam2 = Picamera2(imx500.camera_num)
     main = {'format': 'RGB888'}
-    fps = args.fps or 25
+    fps = args.fps
     config = picam2.create_preview_configuration(
         main, 
         controls={"FrameRate": fps},
@@ -346,15 +380,42 @@ def main():
     )
     display_thread.start()
     
+    # Create a window immediately to show we're working
+    cv2.namedWindow('IMX500 Object Detection', cv2.WINDOW_NORMAL)
+    
     try:
         print("Detection running. Press Ctrl+C to stop.")
+        last_detections = []
         
         while True:
             # Capture a request
             request = picam2.capture_request()
             
-            # Put the request in the jobs queue
+            # Put the request in the jobs queue for detection
             jobs_queue.put(request)
+            
+            # Also display the raw frame immediately for responsiveness
+            # This ensures we always see video even if detection is slow
+            with MappedArray(request, 'main') as m:
+                # Make a copy for display
+                frame = m.array.copy()
+            
+            # Draw any previous detections we have
+            if last_detections:
+                frame = draw_detections(frame, last_detections, labels)
+            
+            # Show the frame immediately
+            cv2.imshow('IMX500 Object Detection', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            
+            # Update last detections if we have new ones
+            try:
+                _, detections = results_queue.get_nowait()
+                if detections:
+                    last_detections = detections
+            except queue.Empty:
+                pass
             
     except KeyboardInterrupt:
         print("\nStopping...")
