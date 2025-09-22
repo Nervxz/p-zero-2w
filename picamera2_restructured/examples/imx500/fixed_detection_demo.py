@@ -29,7 +29,6 @@ import os
 import sys
 import threading
 import queue
-import multiprocessing
 from functools import lru_cache
 
 # Add both the restructured library and original picamera2 to the path
@@ -182,12 +181,16 @@ def draw_detections(request, detections, labels, preserve_aspect_ratio=False, im
         cv2.imshow('IMX500 Object Detection', m.array)
         cv2.waitKey(1)
 
-def detection_worker(jobs_queue, results_queue, imx500_device, camera, args, intrinsics, labels):
-    """Worker process for handling detections."""
-    while True:
+def detection_worker(jobs_queue, results_queue, imx500_device, camera, args, intrinsics, stop_event):
+    """Worker thread for handling detections."""
+    while not stop_event.is_set():
         try:
             # Get the next request to process
-            request = jobs_queue.get()
+            try:
+                request = jobs_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+                
             if request is None:
                 break  # Exit signal
                 
@@ -324,17 +327,17 @@ def main():
         imx500.set_auto_aspect_ratio()
     
     # Create queues for communication
-    jobs_queue = multiprocessing.Queue()
-    results_queue = multiprocessing.Queue()
+    jobs_queue = queue.Queue()
+    results_queue = queue.Queue()
     stop_event = threading.Event()
     
     # Create and start workers
-    detection_process = multiprocessing.Process(
+    detection_thread = threading.Thread(
         target=detection_worker,
-        args=(jobs_queue, results_queue, imx500, picam2, args, intrinsics, labels),
+        args=(jobs_queue, results_queue, imx500, picam2, args, intrinsics, stop_event),
         daemon=True
     )
-    detection_process.start()
+    detection_thread.start()
     
     display_thread = threading.Thread(
         target=display_worker,
@@ -361,7 +364,7 @@ def main():
         jobs_queue.put(None)  # Signal to stop
         
         # Wait for workers to finish
-        detection_process.join(timeout=1.0)
+        detection_thread.join(timeout=1.0)
         display_thread.join(timeout=1.0)
         
         # Clean up
