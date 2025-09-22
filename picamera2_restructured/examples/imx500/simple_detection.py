@@ -124,28 +124,25 @@ def main():
         print("Using original picamera2 implementation")
         
         # Import specific IMX500 implementation from original picamera2
-        from picamera2.devices.imx500.imx500 import IMX500, IMXDetection
+        from picamera2.devices import IMX500
         
-        # Initialize picamera2
-        camera = Picamera2()
+        # Initialize IMX500 device - must be done before Picamera2
+        print(f"Loading model: {model_path}")
+        imx500 = IMX500(model_path)
+        
+        # Initialize picamera2 with the correct camera number
+        camera = Picamera2(imx500.camera_num)
         
         # Configure camera
         config = camera.create_preview_configuration(
-            main={"size": (640, 480)},
+            main={"size": (640, 480), "format": "RGB888"},
             lores={"size": (320, 240)},
             controls={"FrameRate": fps}
         )
         camera.configure(config)
         
         # Start camera
-        camera.start()
-        
-        # Initialize IMX500 device
-        imx500 = IMX500()
-        
-        # Load model
-        print(f"Loading model: {model_path}")
-        imx500.load_model(model_path)
+        camera.start(show_preview=False)
     
     print("Detection running. Press Ctrl+C to stop.")
     
@@ -174,17 +171,41 @@ def main():
                 detections = []
                 if detections_result:
                     for det in detections_result:
-                        if det.confidence >= threshold:
-                            detections.append({
-                                'class_id': det.class_id,
-                                'confidence': det.confidence,
-                                'bbox': [
-                                    int(det.x1 * frame.shape[1]),
-                                    int(det.y1 * frame.shape[0]),
-                                    int(det.x2 * frame.shape[1]),
-                                    int(det.y2 * frame.shape[0])
-                                ]
-                            })
+                        # Check if detection has the expected attributes
+                        if hasattr(det, 'confidence') and det.confidence >= threshold:
+                            # Get class_id and confidence
+                            class_id = getattr(det, 'class_id', 0)
+                            confidence = det.confidence
+                            
+                            # Handle different bbox formats
+                            if hasattr(det, 'x1') and hasattr(det, 'y1') and hasattr(det, 'x2') and hasattr(det, 'y2'):
+                                # Original format with x1,y1,x2,y2 attributes
+                                detections.append({
+                                    'class_id': class_id,
+                                    'confidence': confidence,
+                                    'bbox': [
+                                        int(det.x1 * frame.shape[1]),
+                                        int(det.y1 * frame.shape[0]),
+                                        int(det.x2 * frame.shape[1]),
+                                        int(det.y2 * frame.shape[0])
+                                    ]
+                                })
+                            elif hasattr(det, 'bbox'):
+                                # Alternative format with bbox attribute
+                                bbox = det.bbox
+                                if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                                    # Convert to pixel coordinates if needed
+                                    h, w = frame.shape[:2]
+                                    detections.append({
+                                        'class_id': class_id,
+                                        'confidence': confidence,
+                                        'bbox': [
+                                            int(bbox[0] * w),
+                                            int(bbox[1] * h),
+                                            int(bbox[2] * w),
+                                            int(bbox[3] * h)
+                                        ]
+                                    })
             
             # Draw detection results
             detections_found = 0

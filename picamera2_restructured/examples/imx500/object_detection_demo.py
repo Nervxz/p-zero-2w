@@ -29,6 +29,7 @@ import os
 import sys
 from threading import Thread, Lock
 import queue
+import traceback
 
 # Add both the restructured library and original picamera2 to the path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,19 +42,38 @@ original_picamera2_dir = os.path.abspath(os.path.join(root_dir, 'picamera2'))
 if original_picamera2_dir not in sys.path:
     sys.path.append(original_picamera2_dir)
 
+# Initialize flag for which implementation to use
+USE_RESTRUCTURED = False
+
 try:
     # Try using the restructured library's IMX500 device
     from picamera2_restructured import CameraController
     from picamera2_restructured.devices import DeviceManager
-    from picamera2_restructured.devices.imx500 import IMX500Device
-    from picamera2_restructured.utils import ImageUtils
-    USE_RESTRUCTURED = True
+    try:
+        from picamera2_restructured.devices.imx500 import IMX500Device
+        from picamera2_restructured.utils import ImageUtils
+        USE_RESTRUCTURED = True
+    except ImportError:
+        print("Could not import IMX500Device from restructured library")
 except ImportError:
-    print("Could not import restructured IMX500Device, falling back to original implementation")
-    # Fall back to original picamera2 implementation
+    print("Could not import restructured library modules")
+
+# Always import the original implementation as fallback
+try:
     from picamera2 import Picamera2
-    import picamera2.devices.imx500
-    USE_RESTRUCTURED = False
+    try:
+        # Different versions of picamera2 might have different import paths
+        try:
+            from picamera2.devices import IMX500
+        except ImportError:
+            try:
+                from picamera2.devices.imx500 import IMX500
+            except ImportError:
+                print("Warning: Could not import IMX500 from picamera2")
+    except ImportError:
+        print("Warning: Could not import device modules from picamera2")
+except ImportError:
+    print("Warning: Could not import Picamera2")
 
 class ObjectDetectionApp:
     """Main application for IMX500 object detection."""
@@ -140,28 +160,25 @@ class ObjectDetectionApp:
                 print("Using original picamera2 implementation")
                 
                 # Import specific IMX500 implementation from original picamera2
-                from picamera2.devices.imx500.imx500 import IMX500, IMXDetection
+                from picamera2.devices import IMX500
                 
-                # Initialize picamera2
-                self.camera = Picamera2()
+                # Initialize IMX500 device - must be done before Picamera2
+                print(f"Loading model: {self.args.model}")
+                self.imx500 = IMX500(self.args.model)
+                
+                # Initialize picamera2 with the correct camera number
+                self.camera = Picamera2(self.imx500.camera_num)
                 
                 # Configure camera
                 config = self.camera.create_preview_configuration(
-                    main={"size": (self.args.display_width, self.args.display_height)},
+                    main={"size": (self.args.display_width, self.args.display_height), "format": "RGB888"},
                     lores={"size": (320, 240)},
                     controls={"FrameRate": self.args.fps}
                 )
                 self.camera.configure(config)
                 
                 # Start camera
-                self.camera.start()
-                
-                # Initialize IMX500 device
-                self.imx500 = IMX500()
-                
-                # Load model
-                print(f"Loading model: {self.args.model}")
-                self.imx500.load_model(self.args.model)
+                self.camera.start(show_preview=False)
             
             print("Initialization complete")
             return True
@@ -220,34 +237,185 @@ class ObjectDetectionApp:
                                 detections.append(detection)
                     else:
                         # Process frame with original IMX500 API
-                        # First, detect the objects
-                        detections_result = self.imx500.detect(frame)
+                        # Get metadata from the request
+                        metadata = self.camera.capture_metadata()
                         
-                        # Convert to our standard format
-                        detections = []
-                        if detections_result:
-                            for det in detections_result:
-                                if det.confidence >= self.args.threshold:
-                                    if self.args.bbox_normalization:
-                                        # Use normalized coordinates
-                                        detections.append({
-                                            'class_id': det.class_id,
-                                            'confidence': det.confidence,
-                                            'bbox': [det.x1, det.y1, det.x2, det.y2]
-                                        })
+                        # Get detections from the IMX500 device using metadata
+                        detections_result = []
+                        if metadata:
+                            # Try to get outputs from metadata
+                            try:
+                                # This is similar to the parse_detections function in the original code
+                                np_outputs = self.imx500.get_outputs(metadata, add_batch=True)
+                                if np_outputs is not None:
+                                    # Process outputs based on the model type
+                                    # This is a simplified version of the original processing
+                                    boxes, scores, classes = None, None, None
+                                    
+                                    # Check if we need to use nanodet postprocessing
+                                    if hasattr(self.imx500, 'network_intrinsics') and getattr(self.imx500.network_intrinsics, 'postprocess', '') == 'nanodet':
+                                        # Handle nanodet postprocessing with fallbacks
+                                        postprocess_nanodet_detection = None
+                                        scale_boxes = None
+                                        
+                                        # Try to import the needed functions
+                                        try:
+                                            # Try different import paths
+                                            try:
+                                                from picamera2.devices.imx500 import postprocess_nanodet_detection
+                                            except ImportError:
+                                                try:
+                                                    from picamera2.devices.imx500.imx500 import postprocess_nanodet_detection
+                                                except ImportError:
+                                                    print("Could not import postprocess_nanodet_detection")
+                                            
+                                            try:
+                                                from picamera2.devices.imx500.postprocess import scale_boxes
+                                            except ImportError:
+                                                try:
+                                                    from picamera2.devices.imx500.imx500 import scale_boxes
+                                                except ImportError:
+                                                    print("Could not import scale_boxes")
+                                            
+                                            # Use the functions if available
+                                            if postprocess_nanodet_detection:
+                                                boxes, scores, classes = postprocess_nanodet_detection(
+                                                    outputs=np_outputs[0], 
+                                                    conf=self.args.threshold, 
+                                                    iou_thres=0.65,
+                                                    max_out_dets=10
+                                                )[0]
+                                                
+                                                # Scale boxes if needed
+                                                input_w, input_h = self.imx500.get_input_size()
+                                                if scale_boxes:
+                                                    boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+                                        except Exception as e:
+                                            print(f"Error in nanodet processing: {e}")
+                                            traceback.print_exc()
                                     else:
-                                        # Convert to pixel coordinates
-                                        h, w = frame.shape[:2]
-                                        detections.append({
-                                            'class_id': det.class_id,
-                                            'confidence': det.confidence,
-                                            'bbox': [
-                                                int(det.x1 * w),
-                                                int(det.y1 * h),
-                                                int(det.x2 * w),
-                                                int(det.y2 * h)
-                                            ]
-                                        })
+                                        # Standard processing
+                                        boxes, scores, classes = np_outputs[0][0], np_outputs[1][0], np_outputs[2][0]
+                                        
+                                        # Normalize if needed
+                                        if self.args.bbox_normalization:
+                                            input_w, input_h = self.imx500.get_input_size()
+                                            boxes = boxes / input_h
+                                        
+                                        # Split boxes into separate coordinates
+                                        boxes = np.array_split(boxes, 4, axis=1)
+                                        boxes = list(zip(*boxes))
+                                    
+                                    # Create detection objects
+                                    for box, score, category in zip(boxes, scores, classes):
+                                        if score > self.args.threshold:
+                                            # Convert box to the expected format
+                                            if hasattr(self.imx500, 'convert_inference_coords'):
+                                                # Use the IMX500's coordinate conversion if available
+                                                box_converted = self.imx500.convert_inference_coords(box, metadata, self.camera)
+                                                x, y, w, h = box_converted
+                                                detections_result.append({
+                                                    'class_id': int(category),
+                                                    'confidence': float(score),
+                                                    'bbox': [x, y, w, h]
+                                                })
+                                            else:
+                                                # Fallback to simple conversion
+                                                if len(box) == 4:
+                                                    x1, y1, x2, y2 = box
+                                                    h, w = frame.shape[:2]
+                                                    
+                                                    if self.args.bbox_normalization:
+                                                        # Use normalized coordinates
+                                                        detections_result.append({
+                                                            'class_id': int(category),
+                                                            'confidence': float(score),
+                                                            'bbox': [x1, y1, x2, y2]
+                                                        })
+                                                    else:
+                                                        # Convert to pixel coordinates
+                                                        detections_result.append({
+                                                            'class_id': int(category),
+                                                            'confidence': float(score),
+                                                            'bbox': [
+                                                                int(x1 * w),
+                                                                int(y1 * h),
+                                                                int(x2 * w),
+                                                                int(y2 * h)
+                                                            ]
+                                                        })
+                            except Exception as e:
+                                print(f"Error processing metadata: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # If we couldn't get detections from metadata, fall back to direct detection
+                        if not detections_result:
+                            try:
+                                # Try direct detect method if available
+                                if hasattr(self.imx500, 'detect'):
+                                    raw_detections = self.imx500.detect(frame)
+                                    if raw_detections:
+                                        for det in raw_detections:
+                                            # Check if detection has the expected attributes
+                                            if hasattr(det, 'confidence') and det.confidence >= self.args.threshold:
+                                                # Get class_id and confidence
+                                                class_id = getattr(det, 'class_id', 0)
+                                                confidence = det.confidence
+                                                
+                                                # Handle different bbox formats
+                                                if hasattr(det, 'x1') and hasattr(det, 'y1') and hasattr(det, 'x2') and hasattr(det, 'y2'):
+                                                    # Original format with x1,y1,x2,y2 attributes
+                                                    if self.args.bbox_normalization:
+                                                        # Use normalized coordinates
+                                                        detections_result.append({
+                                                            'class_id': class_id,
+                                                            'confidence': confidence,
+                                                            'bbox': [det.x1, det.y1, det.x2, det.y2]
+                                                        })
+                                                    else:
+                                                        # Convert to pixel coordinates
+                                                        h, w = frame.shape[:2]
+                                                        detections_result.append({
+                                                            'class_id': class_id,
+                                                            'confidence': confidence,
+                                                            'bbox': [
+                                                                int(det.x1 * w),
+                                                                int(det.y1 * h),
+                                                                int(det.x2 * w),
+                                                                int(det.y2 * h)
+                                                            ]
+                                                        })
+                                                elif hasattr(det, 'bbox'):
+                                                    # Alternative format with bbox attribute
+                                                    bbox = det.bbox
+                                                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                                                        if self.args.bbox_normalization:
+                                                            detections_result.append({
+                                                                'class_id': class_id,
+                                                                'confidence': confidence,
+                                                                'bbox': bbox
+                                                            })
+                                                        else:
+                                                            # Convert to pixel coordinates
+                                                            h, w = frame.shape[:2]
+                                                            detections_result.append({
+                                                                'class_id': class_id,
+                                                                'confidence': confidence,
+                                                                'bbox': [
+                                                                    int(bbox[0] * w),
+                                                                    int(bbox[1] * h),
+                                                                    int(bbox[2] * w),
+                                                                    int(bbox[3] * h)
+                                                                ]
+                                                            })
+                            except Exception as e:
+                                print(f"Error using direct detection: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        
+                        # Use the detection results
+                        detections = detections_result
                     
                     # Update latest results with lock
                     with self.lock:
@@ -347,9 +515,6 @@ class ObjectDetectionApp:
         
         self.running = True
         
-        # Start camera
-        self.camera.start()
-        
         # Create and start threads
         threads = []
         threads.append(Thread(target=self.capture_thread, daemon=True))
@@ -375,11 +540,14 @@ class ObjectDetectionApp:
         cv2.destroyAllWindows()
         
         # Close camera based on implementation
-        if USE_RESTRUCTURED:
-            self.camera.close()
-        else:
-            self.camera.stop()
-            self.camera.close()
+        try:
+            if USE_RESTRUCTURED:
+                self.camera.close()
+            else:
+                self.camera.stop()
+                self.camera.close()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
             
         print("Application stopped")
 
