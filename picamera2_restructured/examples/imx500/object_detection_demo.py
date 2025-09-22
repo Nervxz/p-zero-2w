@@ -166,6 +166,11 @@ class ObjectDetectionApp:
                 print(f"Loading model: {self.args.model}")
                 self.imx500 = IMX500(self.args.model)
                 
+                # Show network firmware progress bar if available
+                if hasattr(self.imx500, 'show_network_fw_progress_bar'):
+                    print("Showing network firmware upload progress...")
+                    self.imx500.show_network_fw_progress_bar()
+                
                 # Initialize picamera2 with the correct camera number
                 self.camera = Picamera2(self.imx500.camera_num)
                 

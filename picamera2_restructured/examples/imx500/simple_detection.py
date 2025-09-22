@@ -150,6 +150,11 @@ def main():
         print(f"Loading model: {model_path}")
         imx500 = IMX500(model_path)
         
+        # Show network firmware progress bar if available
+        if hasattr(imx500, 'show_network_fw_progress_bar'):
+            print("Showing network firmware upload progress...")
+            imx500.show_network_fw_progress_bar()
+        
         # Initialize picamera2 with the correct camera number
         camera = Picamera2(imx500.camera_num)
         
