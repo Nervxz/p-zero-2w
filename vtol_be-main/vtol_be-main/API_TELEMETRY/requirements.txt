@@ -1,0 +1,17 @@
+# DroneMAVLinkAPI Requirements
+# Install with: pip install -r requirements.txt
+
+# Core MAVLink library for drone communication
+pymavlink>=2.4.37
+
+# Type hints support for older Python versions
+typing_extensions>=4.0.0
+
+# Dataclasses backport for Python < 3.7
+dataclasses>=0.8; python_version<"3.7"
+
+# Optional dependencies for enhanced functionality
+# numpy>=1.21.0  # For advanced math operations and data processing
+# pandas>=1.3.0  # For data analysis and CSV handling
+# matplotlib>=3.4.0  # For plotting telemetry data and visualization
+# asyncio>=3.4.0  # For asynchronous operations (built-in for Python 3.4+)
